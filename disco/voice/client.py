@@ -111,8 +111,27 @@ class UDPVoiceClient(LoggingClass):
             nonce[:12] = header
             buff = self.vc.secret_box.decrypt(bytes(buff), bytes(nonce))
 
-            # Packets starting with b'\x90' need the first 8 bytes ignored
-            if check == self._CHECK2:
+            if buff[0] == 0xBE and buff[1] == 0xDE:  # RFC5285 Section 4.2: One-Byte Header
+                # Please note: This has been added to future-proof the code however I have been
+                # unable to find any voice clients that are using the one-byte headers. As such,
+                # this code is untested but should work.
+                rtp_header_extension_length = buff[2] << 8 | buff[3]
+                index = 4
+                for i in range(rtp_header_extension_length):
+                    byte = buff[index]
+                    index += 1
+                    if byte == 0:
+                        continue
+
+                    l = (byte & 0b1111) + 1
+                    index += l
+
+                while buff[index] == 0:
+                    index += 1
+
+                buff = buff[index:]
+            elif check == self._CHECK2:
+                # Packets starting with b'\x90' need the first 8 bytes ignored BecauseDiscord(tm)
                 buff = buff[8:]
 
             if ssrc not in self._decoders:
@@ -126,6 +145,9 @@ class UDPVoiceClient(LoggingClass):
                 user_id = int(self.vc.ssrc_lookup[ssrc])
 
                 member = self.vc.channel.guild.get_member(user_id)
+            else:
+                self.log.warning('User speaking was unknown! Dropping packet.')
+                return
 
             buff = self._decoders[ssrc].decode(buff)
 

@@ -156,7 +156,7 @@ class OpusEncoder(BaseOpus):
             return array.array('b', data[:ret]).tostring()
 
 
-class OpusDecoder(BaseOpus):
+class OpusDecoder(BaseOpus, LoggingClass):
     EXPORTED = {
         'opus_decoder_get_size': ([ctypes.c_int], ctypes.c_int),
         'opus_decoder_create': ([ctypes.c_int, ctypes.c_int, c_int_ptr], DecoderStructPtr),
@@ -245,10 +245,10 @@ class OpusDecoder(BaseOpus):
 
         result = self.opus_decode(self.inst, data, len(data), pcm_ptr, frame_size, decode_fec)
         if result < 0:
-            # log.debug('error happened in decode')
+            self.log.debug('error happened in decode')
             raise Exception('Failed to decode: {}'.format(result))
 
-        # log.debug('opus decode result: {} (total buf size: {})'.format(result, len(pcm)))
+        self.log.debug('opus decode result: {} (total buf size: {})'.format(result, len(pcm)))
 
         if six.PY3:
             return array.array('h', pcm).tobytes()
