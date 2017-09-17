@@ -178,6 +178,48 @@ class GuildCreate(GatewayEvent):
         return self.unavailable is None
 
 
+class UserSpeaking(GatewayEvent):
+    """
+    Sent when a user starts or stops speaking in a voice channel
+
+    Attributes
+    -----
+    member : :class:`disco.types.guild.GuildMember`
+        The member speaking
+    speaking : `bool`
+        Is the member speaking?
+    channel : :class:`disco.types.channel.Channel`
+        The channel the member is speaking in
+    """
+    member = Field(GuildMember)
+    speaking = Field(bool)
+    channel = Field(Channel)
+
+
+class VoiceReceived(GatewayEvent):
+    """
+    Sent when a user starts or stops speaking in a voice channel
+
+    Attributes
+    -----
+    member : :class:`disco.types.guild.GuildMember`
+        The member speaking
+    channel : :class:`disco.types.channel.Channel`
+        The channel the member is speaking in
+    voice_data : `bytes`
+        The raw PCM data
+    timestamp : `int`
+        The timestamp of the packet
+    sequence : `int`
+        The sequence of the packet
+    """
+    member = Field(GuildMember)
+    channel = Field(Channel)
+    voice_data = Field(bytes)
+    timestamp = Field(int)
+    sequence = Field(int)
+
+
 @wraps_model(Guild)
 class GuildUpdate(GatewayEvent):
     """
