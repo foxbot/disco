@@ -1,5 +1,5 @@
 gevent==1.2.2
-holster==1.1.0
+-e git+git@github.com:b1naryth1ef/holster.git@9d6eea3646b3e98aa5562d7ab5bdb00ed0b6ec0a#egg=holster
 requests==2.18.4
 six==1.11.0
 websocket-client==0.44.0
