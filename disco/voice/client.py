@@ -3,6 +3,7 @@ from __future__ import print_function
 import gevent
 import socket
 import struct
+import heapq
 import time
 
 try:
@@ -14,9 +15,11 @@ from holster.enum import Enum
 from holster.emitter import Emitter
 
 from disco.gateway.encoding.json import JSONEncoder
+from disco.gateway.events import UserSpeaking, VoiceReceived
 from disco.util.websocket import Websocket
 from disco.util.logging import LoggingClass
 from disco.voice.packets import VoiceOPCode
+from disco.voice.opus import OpusDecoder
 from disco.gateway.packets import OPCode
 
 VoiceState = Enum(
@@ -37,6 +40,13 @@ class VoiceException(Exception):
 
 
 class UDPVoiceClient(LoggingClass):
+    # Struct format of the packet metadata
+    _FORMAT = '>HHII'
+    # Packets should start with b'\x80\x78' (32888 as a big endian ushort)
+    _CHECK = 32888
+    # Some packets will start with b'\x90\x78' (36984)
+    _CHECK2 = 36984
+
     def __init__(self, vc):
         super(UDPVoiceClient, self).__init__()
         self.vc = vc
@@ -55,6 +65,8 @@ class UDPVoiceClient(LoggingClass):
         self._buffer = bytearray(24)
         self._buffer[0] = 0x80
         self._buffer[1] = 0x78
+
+        self._decoders = {}
 
     def send_frame(self, frame, sequence=None, timestamp=None):
         # Convert the frame to a bytearray
@@ -78,7 +90,78 @@ class UDPVoiceClient(LoggingClass):
 
     def run(self):
         while True:
-            self.conn.recvfrom(4096)
+            data, addr = self.conn.recvfrom(4096)
+
+            # Check the packet size
+            if len(data) < 13:
+                raise ValueError('packet is too small: {}'.format(data))
+
+            # Unpack header
+            check, seq, ts, ssrc = struct.unpack_from(self._FORMAT, data)
+            header = data[:12]
+            buff = data[12:]
+
+            # Check the packet is valid
+            if check != self._CHECK and check != self._CHECK2:
+                fmt = 'packet has invalid check bytes: {}'
+                raise ValueError(fmt.format(data))
+
+            # Decrypt data
+            nonce = bytearray(24)
+            nonce[:12] = header
+            buff = self.vc.secret_box.decrypt(bytes(buff), bytes(nonce))
+
+            if buff[0] == 0xBE and buff[1] == 0xDE:  # RFC5285 Section 4.2: One-Byte Header
+                # Please note: This has been added to future-proof the code however I have been
+                # unable to find any voice clients that are using the one-byte headers. As such,
+                # this code is untested but should work.
+                rtp_header_extension_length = buff[2] << 8 | buff[3]
+                index = 4
+                for i in range(rtp_header_extension_length):
+                    byte = buff[index]
+                    index += 1
+                    if byte == 0:
+                        continue
+
+                    l = (byte & 0b1111) + 1
+                    index += l
+
+                while buff[index] == 0:
+                    index += 1
+
+                buff = buff[index:]
+            elif check == self._CHECK2:
+                # Packets starting with b'\x90' need the first 8 bytes ignored BecauseDiscord(tm)
+                buff = buff[8:]
+
+            if ssrc not in self._decoders:
+                self._decoders[ssrc] = OpusDecoder(48000, 2)
+
+            # Lookup the SSRC and then get the user
+            user_id = 0
+            member = None
+
+            if ssrc in self.vc.ssrc_lookup:
+                user_id = int(self.vc.ssrc_lookup[ssrc])
+
+                member = self.vc.channel.guild.get_member(user_id)
+            else:
+                self.log.warning('User speaking was unknown! Dropping packet.')
+                return
+
+            buff = self._decoders[ssrc].decode(buff)
+
+            obj = VoiceReceived()
+            obj.member = member
+            obj.channel = self.vc.channel
+            obj.voice_data = buff
+            obj.timestamp = ts
+            obj.sequence = seq
+
+            self.vc.client.gw.events.emit('VoiceReceived', obj)
+
+            for cb in self.vc.pcm_listeners:
+                cb(obj)
 
     def send(self, data):
         self.conn.sendto(data, (self.ip, self.port))
@@ -132,6 +215,7 @@ class VoiceClient(LoggingClass):
         self.packets = Emitter(spawn_each=True)
         self.packets.on(VoiceOPCode.READY, self.on_voice_ready)
         self.packets.on(VoiceOPCode.SESSION_DESCRIPTION, self.on_voice_sdp)
+        self.packets.on(VoiceOPCode.SPEAKING, self.on_voice_speaking)
 
         # State + state change emitter
         self.state = VoiceState.DISCONNECTED
@@ -150,6 +234,10 @@ class VoiceClient(LoggingClass):
         self.timestamp = 0
 
         self.update_listener = None
+        self.ssrc_lookup = {}
+
+        self.pcm_listeners = []
+        self.speaking_listeners = []
 
         # Websocket connection
         self.ws = None
@@ -181,6 +269,69 @@ class VoiceClient(LoggingClass):
             'op': op.value,
             'd': data,
         }), self.encoder.OPCODE)
+
+    def pipe_voice_into_file(self, member, file_object, buffer_size=0.2):
+        # Convert buffer_size from seconds to packets.
+        buffer_size = int(round((buffer_size * 1000) / 20))
+
+        SAMPLE_RATE = 48000
+        SAMPLE_SIZE = 2
+
+        user_id = member.id
+
+        state = {'last_packet': 0, 'voice_buffer': [], 'last_speaking': 0}
+
+        def listener(vp):
+            if user_id == (None if vp.member is None else vp.member.id):
+                state['last_packet'] = vp.timestamp
+                heapq.heappush(state['voice_buffer'], (vp.timestamp, vp))
+
+                if len(state['voice_buffer']) > buffer_size:
+                    packet = heapq.heappop(state['voice_buffer'])[1]
+
+                    if state['last_packet'] == 0:
+                        delta = 0
+                    else:
+                        delta = (packet.timestamp - state['last_packet']) + 9600
+
+                    print(delta, state['last_packet'])
+
+                    if delta >= 0:  # Ignore skipped packets
+                        data = bytearray([0] * delta * 4)
+                        print(packet.voice_data)
+                        data += packet.voice_data
+
+                        file_object.write(data)
+
+                    state['last_packet'] = packet.timestamp
+
+        def speaking_listener(uid, speaking):
+            if uid == user_id:
+                if speaking:
+                    if state['last_speaking'] != 0:
+                        delta = time.time() - state['last_speaking']
+                        padding = bytearray([0] * int(delta * SAMPLE_RATE) * SAMPLE_SIZE)
+                        file_object.write(padding)
+
+                        state['last_speaking'] = 0
+                else:
+                    state['last_speaking'] = time.time()
+
+        self.pcm_listeners.append(listener)
+        self.speaking_listeners.append(speaking_listener)
+
+    def on_voice_speaking(self, data):
+        self.ssrc_lookup[data['ssrc']] = data['user_id']
+
+        obj = UserSpeaking()
+        obj.member = self.channel.guild.get_member(int(data['user_id']))
+        obj.speaking = data['speaking']
+        obj.channel = self.channel
+
+        for cb in self.speaking_listeners:
+            cb(int(data['user_id']), data['speaking'])
+
+        self.client.gw.events.emit('UserSpeaking', obj)
 
     def on_voice_ready(self, data):
         self.log.info('[%s] Recived Voice READY payload, attempting to negotiate voice connection w/ remote', self)

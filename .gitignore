@@ -7,6 +7,8 @@ storage.json
 .eggs/
 .cache/
 __pycache__
+.idea/*
+*.pyc
 
 # Documentation stuff
 docs/api/
