@@ -135,7 +135,7 @@ class UDPVoiceClient(LoggingClass):
                 buff = buff[8:]
 
             if ssrc not in self._decoders:
-                self._decoders[ssrc] = OpusDecoder(48000, 2)
+                self._decoders[ssrc] = OpusDecoder(self.vc.sampling_rate, self.vc.channels)
 
             # Lookup the SSRC and then get the user
             user_id = 0
@@ -415,11 +415,14 @@ class VoiceClient(LoggingClass):
 
         if self.state == VoiceState.CONNECTED:
             self.log.info('Attempting voice reconnection')
-            self.connect()
+            self.connect(sampling_rate=self.sampling_rate, channels=self.channels)
 
-    def connect(self, timeout=5, mute=False, deaf=False):
+    def connect(self, timeout=5, mute=False, deaf=False, sampling_rate=48000, channels=2):
         self.log.debug('[%s] Attempting connection', self)
         self.set_state(VoiceState.AWAITING_ENDPOINT)
+
+        self.sampling_rate = sampling_rate
+        self.channels = channels
 
         self.update_listener = self.client.events.on('VoiceServerUpdate', self.on_voice_server_update)
 
