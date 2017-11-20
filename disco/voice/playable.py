@@ -27,7 +27,7 @@ class AbstractOpus(object):
     def __init__(self, sampling_rate=48000, frame_length=20, channels=2):
         self.sampling_rate = sampling_rate
         self.frame_length = frame_length
-        self.channels = 2
+        self.channels = channels
         self.sample_size = 2 * self.channels
         self.samples_per_frame = int(self.sampling_rate / 1000 * self.frame_length)
         self.frame_size = self.samples_per_frame * self.sample_size
